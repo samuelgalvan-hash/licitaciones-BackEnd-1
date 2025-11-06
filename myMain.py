@@ -3,7 +3,7 @@ from fastapi import FastAPI, Query, HTTPException
 import httpx, re, json, subprocess, sys
 from lxml import etree
 from typing import List, Optional
-from services.pliegos import extract_pliegos_from_entry  # 👈 nuevo import
+from pliegos import extract_pliegos_from_entry  # 👈 nuevo import
 import asyncio
 # -*- coding: utf-8 -*-
 import sys
@@ -313,3 +313,4 @@ def detalle_licitacion(url: str = Query(..., description="URL completa (idEvl) d
         data["pliegos_xml"] = []
 
     return data
+

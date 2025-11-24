@@ -114,32 +114,46 @@ cpvs_licitacion: dict[str, str] = {}
 # =========================================================
 # 1️⃣ LICITACIONES POR COMUNIDAD
 # =========================================================
+# =========================================================
+# 1️⃣ LICITACIONES POR COMUNIDAD (versión robusta + feed-fallback)
+# =========================================================
 @app.get("/licitaciones_es")
 async def licitaciones_es(
-    comunidades: List[str] = Query(...),
+    comunidades: List[str] = Query(..., description="Lista de comunidades autónomas (varias posibles)"),
     limit: int = Query(30, ge=1, le=300)
 ):
     """
-    Obtiene licitaciones filtradas por comunidades autónomas
-    Y ADEMÁS genera automáticamente los CPVs para que /cpv_disponibles funcione sin pasos extra.
+    Obtiene licitaciones filtradas por comunidades autónomas.
+    Con fallback automático si un feed devuelve HTML en vez de XML.
     """
-    global Licitaciones_url, cpvs_licitacion
+    global Licitaciones_url
     Licitaciones_url = []
-    cpvs_licitacion = {}  # 🔥 limpiamos CPVs para nueva búsqueda
 
-    # Normalizar parámetros
+    # Normalizar comunidades
     comunidades_normalizadas = []
     for param in comunidades:
         for c in param.split(","):
             comunidades_normalizadas.append(c.strip().lower())
 
+    # Expandir comunidades a provincias
+    provincias_filtrar = []
+    for c in comunidades_normalizadas:
+        provincias_filtrar.extend(COMUNIDADES.get(c, [c]))
+
     items = []
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         for feed_url in FEEDS:
             try:
                 r = await client.get(feed_url)
-                r.raise_for_status()
-                xml = etree.fromstring(r.content)
+                content = r.content
+
+                # ⚠️ Validación — si devuelve HTML en lugar del feed Atom, ignorar
+                if b"<feed" not in content[:2000].lower():
+                    print(f"⚠️ Feed no válido (HTML devuelto). Ignorando → {feed_url}")
+                    continue
+
+                xml = etree.fromstring(content)
                 entries = xml.xpath("//atom:entry", namespaces=NS)
 
                 for e in entries:
@@ -147,34 +161,29 @@ async def licitaciones_es(
                     updated = e.findtext(".//atom:updated", namespaces=NS) or ""
                     link_el = e.find(".//atom:link", namespaces=NS)
                     url = link_el.attrib.get("href") if link_el is not None else None
+
                     if not url:
                         continue
 
                     blob = _text(e)
 
-                    # Provincias filtradas
-                    provincias_filtrar = []
-                    for c in comunidades_normalizadas:
-                        provincias_filtrar.extend(COMUNIDADES.get(c, [c]))
-
-                    if not any(p in blob for p in provincias_filtrar):
+                    # Filtro por provincias
+                    if not any(p.lower() in blob for p in provincias_filtrar):
                         continue
-
-                    importe = _parse_importe(blob)
-                    organo = _parse_organo(blob)
-                    cpv_guess = _parse_posible_cpv(blob)
 
                     items.append({
                         "title": title.strip(),
                         "updated": updated,
                         "url": url,
-                        "organo": organo,
-                        "importe": importe,
-                        "cpv_guess": cpv_guess,
+                        "organo": _parse_organo(blob),
+                        "importe": _parse_importe(blob),
+                        "cpv_guess": _parse_posible_cpv(blob),
                         "feed_origen": feed_url
                     })
+
                     Licitaciones_url.append(url)
 
+                    # Límite alcanzado
                     if len(items) >= limit:
                         break
 
@@ -182,20 +191,14 @@ async def licitaciones_es(
                     break
 
             except Exception as e:
-                print(f"⚠️ Error leyendo {feed_url}: {e}")
+                print(f"⚠️ Error leyendo feed {feed_url}: {e}")
+                continue
 
     if not Licitaciones_url:
-        raise HTTPException(status_code=404, detail="No se encontraron licitaciones.")
-
-    # -------------------------------------------------------------
-    # 🟢 GENERACIÓN AUTOMÁTICA DE CPVs (sin llamar /cpv_licitaciones)
-    # -------------------------------------------------------------
-    print("🟢 Generando CPVs automáticamente...")
-    for url in Licitaciones_url:
-        data = _scrape_via_subprocess(url)
-        cpvs_licitacion[url] = data.get("cpv", "") if isinstance(data, dict) else ""
-
-    print("🟢 CPVs listos.")
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron licitaciones en las comunidades solicitadas (o los feeds están temporalmente caídos)."
+        )
 
     return {"count": len(items), "results": items}
 
@@ -325,6 +328,7 @@ def detalle_licitacion(url: str = Query(..., description="URL completa (idEvl) d
         data["pliegos_xml"] = []
 
     return data
+
 
 
 

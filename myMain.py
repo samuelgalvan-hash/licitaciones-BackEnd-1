@@ -28,6 +28,7 @@ origins = [
     "https://f9109a88-847c-4113-8df3-463cb9979842.lovableproject.com", 
     "https://1ab90ef1b4ad.ngrok-free.app",
     "https://licitaciones-7q8a.onrender.com",# 👈 tu URL de ngrok actual
+    "licitaciones-production.up.railway.app",
 ]
 
 app.add_middleware(
@@ -328,6 +329,7 @@ def detalle_licitacion(url: str = Query(..., description="URL completa (idEvl) d
         data["pliegos_xml"] = []
 
     return data
+
 
 
 

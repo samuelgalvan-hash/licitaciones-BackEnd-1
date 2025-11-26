@@ -1,7 +1,7 @@
-# Imagen base oficial de Python (compatible con Playwright)
+# Imagen base oficial de Python con soporte slim
 FROM python:3.11-slim
 
-# Instalar dependencias necesarias
+# 1) Dependencias necesarias para Chromium y Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -31,20 +31,24 @@ RUN apt-get update && apt-get install -y \
     libxi6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Crear directorio de trabajo
+# 2) Directorio de trabajo
 WORKDIR /app
 
-# Copiar archivos
+# 3) Copiar e instalar dependencias de Python
 COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# 4) Instalar el CLI de Playwright (IMPORTANTE)
+RUN pip install playwright
 
-# Instalar browsers Playwright
+# 5) Instalar los navegadores  
 RUN playwright install --with-deps chromium
 
-# Exponer puerto
+# 6) Copiar el resto del proyecto
+COPY . .
+
+# 7) Exponer puerto
 EXPOSE 8000
 
-# Comando de inicio
+# 8) Ejecutar FastAPI
 CMD ["uvicorn", "myMain:app", "--host", "0.0.0.0", "--port", "8000"]

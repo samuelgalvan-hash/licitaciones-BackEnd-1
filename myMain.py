@@ -28,7 +28,7 @@ origins = [
     "http://127.0.0.1:3000",
 
     # Producción (Vercel)
-    "https://licita-vision-es-front-end.vercel.app",
+    "https://licitavisionesfrontend.vercel.app/",
 
     # (Opcional) Si pruebas desde lovable/ngrok, deja estos. Si no los usas, bórralos.
     "https://lovable.dev",
@@ -339,6 +339,7 @@ async def detalle_licitacion(
         data["pliegos_xml"] = []
 
     return data
+
 
 
 

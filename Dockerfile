@@ -38,4 +38,7 @@ EXPOSE 10000
 
 # 5) Arranque FastAPI apuntando a myMain.py en RAÍZ
 # Nota: ${PORT} lo inyecta Render en runtime; usamos 10000 por defecto si no está.
+
 CMD ["bash", "-c", "uvicorn myMain:app --host 0.0.0.0 --port ${PORT:-10000}"]
+``
+

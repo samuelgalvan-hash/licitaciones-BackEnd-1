@@ -33,4 +33,3 @@ EXPOSE 10000
 
 # 4) Arranque FastAPI apuntando a myMain.py en RAÍZ
 CMD ["bash", "-c", "uvicorn myMain:app --host 0.0.0.0 --port ${PORT:-10000}"]
-``

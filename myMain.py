@@ -1,54 +1,69 @@
+
 # myMain.py
 from fastapi import FastAPI, Query, HTTPException
-import httpx, re, json, subprocess, sys
+from fastapi.middleware.cors import CORSMiddleware
+import httpx, re, json, subprocess, sys, os
 from lxml import etree
 from typing import List, Optional
 from pliegos import extract_pliegos_from_entry  # 👈 nuevo import
-import asyncio
-# -*- coding: utf-8 -*-
-import sys
+
+# Asegurar salida en UTF-8
 sys.stdout.reconfigure(encoding='utf-8')
 
-
-
+# ---------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------
 app = FastAPI(
     title="PLACSP Connector",
     description="Listado de licitaciones en España + detalle + CPV + pliegos (Windows-safe con Playwright en subproceso).",
-    version="1.1.0",
+    version="1.1.1",
 )
 
-from fastapi.middleware.cors import CORSMiddleware
+# ---------------------------------------------------------
+# CORS (¡clave para tu error actual!)
+# - Sin barra final en dominios
+# - Permitimos producción y previews de Vercel con regex
+# - Puedes sobreescribir con variable de entorno CORS_ORIGINS
+#   (separada por comas) en Render si lo prefieres.
+# ---------------------------------------------------------
+origins_env = os.getenv("CORS_ORIGINS", "").strip()
+if origins_env:
+    allowed_origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = [
+        # Desarrollo local (opcional)
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
 
-# Añadir esto después de crear la app
-origins = [
-    # Local dev
-    "http://localhost",
-    "http://127.0.0.1",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+        # Producción (Vercel) - ¡SIN barra final!
+        "https://licita-vision-es-frontend-1.vercel.app",
 
-    # Producción (Vercel)
-    "https://licita-vision-es-frontend-1.vercel.app/",
+        # Preview actual que mostraste (puede cambiar en cada deploy)
+        "https://licita-vision-es-frontend-1-git-main-samuels-projects-37ed2b28.vercel.app",
+    ]
 
-    # (Opcional) Si pruebas desde lovable/ngrok, deja estos. Si no los usas, bórralos.
-    "https://lovable.dev",
-    "https://f9109a88-847c-4113-8df3-463cb9979842.lovableproject.com",
-    "https://1ab90ef1b4ad.ngrok-free.app",
-]
-
-
+# Permitimos también cualquier *.vercel.app mediante regex (útil para previews)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # dominios permitidos
+    allow_origins=allowed_origins,                 # lista explícita
+    allow_origin_regex=r"^https://.*\.vercel\.app$",  # cualquier subdominio de vercel.app
     allow_credentials=True,
-    allow_methods=["*"],            # permitir todos los métodos (GET, POST, etc.)
-    allow_headers=["*"],            # permitir todas las cabeceras
+    allow_methods=["GET", "POST", "OPTIONS"],      # OPTIONS necesario para preflight
+    allow_headers=["*"],
 )
 
+# ---------------------------------------------------------
+# Ruta raíz de salud (evita confusiones con 404 en "/")
+# ---------------------------------------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "licitaciones-backend"}
 
-# ---------------------------
-#  FEEDS BASE
-# ---------------------------
+# ---------------------------------------------------------
+# FEEDS BASE
+# ---------------------------------------------------------
 FEEDS = [
     "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_1/licitacionesPerfilesContratanteCompleto3.atom",
     "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_640/licitacionesPerfilesContratanteCompleto3.atom",
@@ -56,12 +71,11 @@ FEEDS = [
     "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_642/licitacionesPerfilesContratanteCompleto3.atom",
     "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom",
 ]
-
 NS = {"atom": "http://www.w3.org/2005/Atom"}
 
-# ---------------------------
-#  AYUDAS GEOGRÁFICAS
-# ---------------------------
+# ---------------------------------------------------------
+# AYUDAS GEOGRÁFICAS
+# ---------------------------------------------------------
 PROVINCIAS = {
     "andalucía", "aragón", "asturias", "baleares", "canarias", "cantabria",
     "castilla-la mancha", "castilla y león", "cataluña", "comunidad valenciana",
@@ -90,16 +104,13 @@ COMUNIDADES = {
     "melilla": ["melilla"]
 }
 
-# ---------------------------
-#  FUNCIONES AUXILIARES
-# ---------------------------
+# ---------------------------------------------------------
+# FUNCIONES AUXILIARES
+# ---------------------------------------------------------
 def _text(e) -> str:
     s = e.findtext(".//atom:summary", namespaces=NS) or ""
     c = e.findtext(".//atom:content", namespaces=NS) or ""
     return f"{s} {c}".lower()
-
-def _looks_spain(text: str) -> bool:
-    return any(p in text for p in PROVINCIAS)
 
 def _parse_importe(text: str) -> Optional[str]:
     m = re.search(r"\b\d{1,3}(?:\.\d{3})*(?:,\d{2})\b", text)
@@ -113,17 +124,14 @@ def _parse_posible_cpv(text: str) -> Optional[str]:
     m = re.search(r"\b(\d{8})\b", text)
     return m.group(1) if m else None
 
-# ---------------------------
-#  VARIABLES GLOBALES
-# ---------------------------
+# ---------------------------------------------------------
+# VARIABLES GLOBALES (estado entre endpoints)
+# ---------------------------------------------------------
 Licitaciones_url: list[str] = []
 cpvs_licitacion: dict[str, str] = {}
 
 # =========================================================
-# 1️⃣ LICITACIONES POR COMUNIDAD
-# =========================================================
-# =========================================================
-# 1️⃣ LICITACIONES POR COMUNIDAD (versión robusta + feed-fallback)
+# 1️⃣ LICITACIONES POR COMUNIDAD (versión robusta + validación feed)
 # =========================================================
 @app.get("/licitaciones_es")
 async def licitaciones_es(
@@ -132,7 +140,7 @@ async def licitaciones_es(
 ):
     """
     Obtiene licitaciones filtradas por comunidades autónomas.
-    Con fallback automático si un feed devuelve HTML en vez de XML.
+    Valida que el feed sea XML/ATOM y añade cabeceras para evitar respuestas HTML por anti-bot.
     """
     global Licitaciones_url
     Licitaciones_url = []
@@ -143,25 +151,42 @@ async def licitaciones_es(
         for c in param.split(","):
             comunidades_normalizadas.append(c.strip().lower())
 
-    # Expandir comunidades a provincias
+    # Expandir a provincias
     provincias_filtrar = []
     for c in comunidades_normalizadas:
         provincias_filtrar.extend(COMUNIDADES.get(c, [c]))
 
     items = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    headers = {
+        # Cabeceras "de navegador" para reducir respuestas HTML de bloqueo
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
         for feed_url in FEEDS:
             try:
                 r = await client.get(feed_url)
                 content = r.content
+                ctype = r.headers.get("content-type", "").lower()
 
-                # ⚠️ Validación — si devuelve HTML en lugar del feed Atom, ignorar
-                if b"<feed" not in content[:2000].lower():
-                    print(f"⚠️ Feed no válido (HTML devuelto). Ignorando → {feed_url}")
+                # Validación: content-type debe incluir xml/atom, o al menos contener "<feed"
+                first_chunk = content[:2000].lower()
+                if ("xml" not in ctype and "atom" not in ctype) and (b"<feed" not in first_chunk):
+                    print(f"⚠️ Feed no válido (posible HTML). Ignorando → {feed_url}")
                     continue
 
-                xml = etree.fromstring(content)
+                try:
+                    xml = etree.fromstring(content)
+                except Exception as ex:
+                    print(f"⚠️ XML inválido en {feed_url}: {ex}")
+                    continue
+
                 entries = xml.xpath("//atom:entry", namespaces=NS)
 
                 for e in entries:
@@ -169,7 +194,6 @@ async def licitaciones_es(
                     updated = e.findtext(".//atom:updated", namespaces=NS) or ""
                     link_el = e.find(".//atom:link", namespaces=NS)
                     url = link_el.attrib.get("href") if link_el is not None else None
-
                     if not url:
                         continue
 
@@ -191,7 +215,6 @@ async def licitaciones_es(
 
                     Licitaciones_url.append(url)
 
-                    # Límite alcanzado
                     if len(items) >= limit:
                         break
 
@@ -210,7 +233,6 @@ async def licitaciones_es(
 
     return {"count": len(items), "results": items}
 
-
 # =========================================================
 # 2️⃣ SCRAPER DE CPVs (usa subproceso Playwright)
 # =========================================================
@@ -227,11 +249,10 @@ def _scrape_via_subprocess(url: str, timeout_sec: int = 75) -> dict:
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
 
-        # 🧩 Mostrar en consola si hay error
         if stderr:
             print(f"⚠️ STDERR de Playwright: {stderr[:300]}")
 
-        # 🧩 A veces se imprimen líneas vacías o mensajes antes del JSON → limpiamos
+        # Limpiar salida: quedarnos con el JSON principal
         json_start = stdout.find("{")
         json_end = stdout.rfind("}")
         if json_start != -1 and json_end != -1:
@@ -254,7 +275,6 @@ def _scrape_via_subprocess(url: str, timeout_sec: int = 75) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-
 @app.get("/cpv_licitaciones")
 def cpv_licitaciones():
     global Licitaciones_url, cpvs_licitacion
@@ -266,7 +286,7 @@ def cpv_licitaciones():
         print(f"🟢 Procesando: {url}")
         data = _scrape_via_subprocess(url)
         cpvs_licitacion[url] = data.get("cpv", "") if isinstance(data, dict) else ""
-        if "error" in data:
+        if isinstance(data, dict) and "error" in data:
             print(f"⚠️ Error procesando {url}: {data['error']}")
 
     return {"count": len(cpvs_licitacion), "results": cpvs_licitacion}
@@ -288,7 +308,6 @@ def cpv_disponibles():
 
     unicos = sorted(set(todos))
     return {"count": len(unicos), "cpvs": unicos}
-
 
 # =========================================================
 # 4️⃣ FILTRAR LICITACIONES POR CPV (multi-selección)
@@ -323,8 +342,6 @@ async def detalle_licitacion(
     - título, entidad, CPV, importe (Playwright)
     - pliegos extraídos del XML real del feed
     """
-
-    # 1️⃣ Ejecutar Playwright (detalle HTML)
     data = _scrape_via_subprocess(url)
 
     if isinstance(data, dict) and "error" in data:
@@ -333,37 +350,11 @@ async def detalle_licitacion(
     # 2️⃣ Extraer pliegos desde el feed XML
     try:
         pliegos = await extract_pliegos_from_entry(entry_url=url, feed_doc_url=feed)
-        data["pliegos_xml"] = pliegos
+        if isinstance(data, dict):
+            data["pliegos_xml"] = pliegos
     except Exception as e:
         print(f"⚠️ Error extrayendo pliegos: {e}")
-        data["pliegos_xml"] = []
+        if isinstance(data, dict):
+            data["pliegos_xml"] = []
 
     return data
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

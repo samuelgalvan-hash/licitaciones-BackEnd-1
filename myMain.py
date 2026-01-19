@@ -221,3 +221,109 @@ async def licitaciones_es(
                         "url": url,
                         "organo": _parse_organo(blob),
                         "importe": _parse_importe(blob),
+                        "cpv_guess": _parse_posible_cpv(blob),
+                        "feed_origen": feed_url
+                    })
+
+                    Licitaciones_url.append(url)
+
+                    if len(items) >= limit:
+                        break
+
+                if len(items) >= limit:
+                    break
+
+            except Exception as ex:
+                print(f"Feed error: {ex}")
+                continue
+
+    return {"count": len(items), "results": items}
+
+# ===========================================
+# 2️⃣ SCRAPER CPV
+# ===========================================
+def _scrape_via_subprocess(url: str, timeout_sec=75):
+    try:
+        completed = subprocess.run(
+            [sys.executable, "run_scraper_subprocess.py", url],
+            capture_output=True, text=True, timeout=timeout_sec
+        )
+        stdout = (completed.stdout or "").strip()
+
+        # Extraer solo JSON
+        start = stdout.find("{")
+        end = stdout.rfind("}")
+        if start != -1 and end != -1:
+            stdout = stdout[start:end+1]
+
+        return json.loads(stdout)
+
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/cpv_licitaciones")
+def cpv_licitaciones():
+    global Licitaciones_url, cpvs_licitacion
+    if not Licitaciones_url:
+        raise HTTPException(status_code=400, detail="Ejecuta /licitaciones_es primero")
+
+    cpvs_licitacion = {}
+
+    for url in Licitaciones_url:
+        data = _scrape_via_subprocess(url)
+        cpvs_licitacion[url] = data.get("cpv", "") if isinstance(data, dict) else ""
+
+    return {"count": len(cpvs_licitacion), "results": cpvs_licitacion}
+
+# ===========================================
+# 3️⃣ CPVs DISPONIBLES
+# ===========================================
+@app.get("/cpv_disponibles")
+def cpv_disponibles():
+    if not cpvs_licitacion:
+        raise HTTPException(status_code=400, detail="Ejecuta /cpv_licitaciones primero")
+
+    todos = []
+    for v in cpvs_licitacion.values():
+        matches = re.findall(r"\b\d{8}\s*[-–—]?\s*[^\d\n]+", v)
+        todos.extend([m.strip() for m in matches])
+
+    unicos = sorted(set(todos))
+    return {"count": len(unicos), "cpvs": unicos}
+
+# ===========================================
+# 4️⃣ FILTRADO CPV
+# ===========================================
+@app.get("/filtrar_cpvs")
+def filtrar_cpvs(cpvs: List[str] = Query(...)):
+    if not cpvs_licitacion:
+        raise HTTPException(status_code=400, detail="Ejecuta /cpv_licitaciones primero")
+
+    seleccionados = set(cpvs)
+    resultados = {}
+
+    for url, cpv_str in cpvs_licitacion.items():
+        cpv_list = re.findall(r"\b\d{8}[^,]*?(?=\s*\d{8}|\Z)", cpv_str)
+        cpv_list = [c.strip() for c in cpv_list]
+        if any(c in cpv_list for c in seleccionados):
+            resultados[url] = cpv_list
+
+    return {"count": len(resultados), "results": resultados}
+
+# ===========================================
+# 5️⃣ DETALLE DE LICITACIÓN
+# ===========================================
+@app.get("/detalle_licitacion")
+async def detalle_licitacion(url: str, feed: str):
+    data = _scrape_via_subprocess(url)
+
+    if isinstance(data, dict) and "error" in data:
+        raise HTTPException(status_code=502, detail=data["error"])
+
+    try:
+        pliegos = await extract_pliegos_from_entry(entry_url=url, feed_doc_url=feed)
+        data["pliegos_xml"] = pliegos
+    except:
+        data["pliegos_xml"] = []
+
+    return data
